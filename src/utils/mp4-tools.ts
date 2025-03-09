@@ -7,6 +7,16 @@ import type { KeySystemIds } from './mediakeys-helper';
 import type { PassthroughTrack, UserdataSample } from '../types/demuxer';
 import type { DecryptData } from '../loader/level-key';
 
+// Just a quick hack to help choose whether to play DoVi profile 8 video as DoVi or HDR.
+import { getMediaSource } from './mediasource-helper';
+function isDoViSupported(): boolean {
+  const mediaSource = getMediaSource();
+  if (!mediaSource) {
+    return false;
+  }
+  return mediaSource.isTypeSupported('video/mp4;codecs="dvh1.05.06"');
+}
+
 const UINT32_MAX = Math.pow(2, 32) - 1;
 const push = [].push;
 
@@ -371,35 +381,42 @@ function parseStsd(stsd: Uint8Array): { codec: string; encrypted: boolean } {
       break;
     }
     case 'hvc1':
-    case 'hev1': {
-      const hvcCBox = findBox(sampleEntriesEnd, ['hvcC'])[0];
-      const profileByte = hvcCBox[1];
-      const profileSpace = ['', 'A', 'B', 'C'][profileByte >> 6];
-      const generalProfileIdc = profileByte & 0x1f;
-      const profileCompat = readUint32(hvcCBox, 2);
-      const tierFlag = (profileByte & 0x20) >> 5 ? 'H' : 'L';
-      const levelIDC = hvcCBox[12];
-      const constraintIndicator = hvcCBox.subarray(6, 12);
-      codec += '.' + profileSpace + generalProfileIdc;
-      codec += '.' + profileCompat.toString(16).toUpperCase();
-      codec += '.' + tierFlag + levelIDC;
-      let constraintString = '';
-      for (let i = constraintIndicator.length; i--; ) {
-        const byte = constraintIndicator[i];
-        if (byte || constraintString) {
-          const encodedByte = byte.toString(16).toUpperCase();
-          constraintString = '.' + encodedByte + constraintString;
-        }
-      }
-      codec += constraintString;
-      break;
-    }
+    case 'hev1':
     case 'dvh1':
     case 'dvhe': {
-      const dvcCBox = findBox(sampleEntriesEnd, ['dvcC'])[0];
-      const profile = (dvcCBox[2] >> 1) & 0x7f;
-      const level = ((dvcCBox[2] << 5) & 0x20) | ((dvcCBox[3] >> 3) & 0x1f);
-      codec += '.' + addLeadingZero(profile) + '.' + addLeadingZero(level);
+      const hvcCResult = findBox(sampleEntriesEnd, ['hvcC']);
+      if (hvcCResult.length) {
+        const hvcCBox = findBox(sampleEntriesEnd, ['hvcC'])[0];
+        const profileByte = hvcCBox[1];
+        const profileSpace = ['', 'A', 'B', 'C'][profileByte >> 6];
+        const generalProfileIdc = profileByte & 0x1f;
+        const profileCompat = readUint32(hvcCBox, 2);
+        const tierFlag = (profileByte & 0x20) >> 5 ? 'H' : 'L';
+        const levelIDC = hvcCBox[12];
+        const constraintIndicator = hvcCBox.subarray(6, 12);
+        codec = 'hvc1.' + profileSpace + generalProfileIdc;
+        codec += '.' + profileCompat.toString(16).toUpperCase();
+        codec += '.' + tierFlag + levelIDC;
+        let constraintString = '';
+        for (let i = constraintIndicator.length; i--; ) {
+          const byte = constraintIndicator[i];
+          if (byte || constraintString) {
+            const encodedByte = byte.toString(16).toUpperCase();
+            constraintString = '.' + encodedByte + constraintString;
+          }
+        }
+        codec += constraintString;
+      }
+      if (isDoViSupported()) {
+        const dvcCResult = findBox(sampleEntriesEnd, ['dvcC']); // used by DoVi Profiles up to 7 and 20
+        const dvvCResult = findBox(sampleEntriesEnd, ['dvvC']); // used by DoVi Profile 8 to 10
+        if (dvcCResult.length || dvvCResult.length) {
+          const dvXCBox = dvvCResult.length ? dvvCResult[0] : dvcCResult[0];
+          const doViProfile = (dvXCBox[2] >> 1) & 0x7f;
+          const doViLevel = ((dvXCBox[2] << 5) & 0x20) | ((dvXCBox[3] >> 3) & 0x1f);
+          codec = 'dvh1.' + addLeadingZero(doViProfile) + '.' + addLeadingZero(doViLevel);
+        }
+      }
       break;
     }
     case 'vp09': {
